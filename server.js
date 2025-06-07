@@ -1,392 +1,243 @@
 const express = require('express');
 const cors = require('cors');
-const path = require('path');
-const multer = require('multer');
+const bodyParser = require('body-parser');
 const { Pool } = require('pg');
-const fs = require('fs');
+const path = require('path');
 
 const app = express();
-app.use(cors());
-app.use(express.json());
-app.use(express.static(__dirname));
+const port = process.env.PORT || 3000;
 
-// PostgreSQL pool
+// Pool PostgreSQL (utilise les variables d'environnement Render ou locales)
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL || "postgresql://fareno:VBEeEFG1WhIkLIYaTMg06mfDJPoFerme@dpg-d10l5ei4d50c73ato2bg-a.oregon-postgres.render.com/fareno_db",
-    ssl: { rejectUnauthorized: false }
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
 });
 
-// Création du dossier uploads pour les documents
-const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => cb(null, uploadsDir),
-    filename: (req, file, cb) => {
-        const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-        cb(null, uniqueSuffix + '-' + file.originalname);
-    }
-});
-const upload = multer({ storage });
+app.use(cors());
+app.use(bodyParser.json());
 
-// Création des tables si elles n'existent pas et admin par défaut
-(async () => {
-    try {
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS admins (
-                id SERIAL PRIMARY KEY,
-                email VARCHAR(255) UNIQUE NOT NULL,
-                password VARCHAR(255) NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS teachers (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(255),
-                subjects TEXT,
-                availability TEXT
-            );
-            CREATE TABLE IF NOT EXISTS groups (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(255),
-                studentCount INTEGER,
-                subjects TEXT
-            );
-            CREATE TABLE IF NOT EXISTS rooms (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(255),
-                capacity INTEGER,
-                equipment TEXT
-            );
-            CREATE TABLE IF NOT EXISTS students (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(255),
-                email VARCHAR(255),
-                password VARCHAR(255)
-            );
-            CREATE TABLE IF NOT EXISTS documents (
-                id SERIAL PRIMARY KEY,
-                title VARCHAR(255),
-                category VARCHAR(255),
-                fileName VARCHAR(255),
-                uploadedBy VARCHAR(255),
-                uploadDate VARCHAR(32)
-            );
-            CREATE TABLE IF NOT EXISTS constraints (
-                id SERIAL PRIMARY KEY,
-                resource VARCHAR(255),
-                day VARCHAR(32),
-                time VARCHAR(32),
-                type VARCHAR(32)
-            );
-        `);
-        // Création admin par défaut
-        const { rows } = await pool.query('SELECT * FROM admins WHERE email = $1', ['farenogif@gmail.com']);
-        if (rows.length === 0) {
-            await pool.query('INSERT INTO admins (email, password) VALUES ($1, $2)', ['farenogif@gmail.com', 'fareno12']);
-            console.log('Administrateur par défaut créé.');
-        } else {
-            console.log('Administrateur par défaut déjà existant.');
-        }
-    } catch (err) {
-        console.error('Erreur lors de l\'initialisation de la base:', err.message);
-    }
-})();
+// Servir les fichiers statiques HTML à la racine
+app.use(express.static(path.join(__dirname)));
 
-// Utilitaires SQL
-async function fetchAll(table) {
-    const { rows } = await pool.query(`SELECT * FROM ${table}`);
-    return rows;
-}
-async function fetchById(table, id) {
-    const { rows } = await pool.query(`SELECT * FROM ${table} WHERE id = $1`, [id]);
-    return rows[0];
-}
-async function insert(table, data) {
-    const keys = Object.keys(data);
-    const values = Object.values(data);
-    const params = keys.map((_, i) => `$${i + 1}`).join(', ');
-    const { rows } = await pool.query(
-        `INSERT INTO ${table} (${keys.join(',')}) VALUES (${params}) RETURNING *`, values
-    );
-    return rows[0];
-}
-async function update(table, id, data) {
-    const keys = Object.keys(data);
-    const values = Object.values(data);
-    const set = keys.map((k, i) => `${k} = $${i + 1}`).join(', ');
-    values.push(id);
-    const { rows } = await pool.query(
-        `UPDATE ${table} SET ${set} WHERE id = $${values.length} RETURNING *`, values
-    );
-    return rows[0];
-}
-async function remove(table, id) {
-    const { rows } = await pool.query(`DELETE FROM ${table} WHERE id = $1 RETURNING *`, [id]);
-    return rows[0];
-}
-
-// Mappage des types de ressources
-const tableMap = {
-    teachers: 'teachers',
-    groups: 'groups',
-    rooms: 'rooms',
-    admins: 'admins',
-    students: 'students',
-    documents: 'documents',
-    constraints: 'constraints'
-};
-
-// Connexion admin
-app.post('/api/login', async (req, res) => {
-    const { email, password } = req.body;
-    if (!email || !password) return res.status(400).json({ error: 'Email et mot de passe requis' });
-    try {
-        const { rows } = await pool.query('SELECT * FROM admins WHERE email = $1 AND password = $2', [email, password]);
-        if (!rows.length) return res.status(401).json({ error: 'Identifiants incorrects' });
-        res.json({ message: 'Connexion réussie', admin: { id: rows[0].id, email: rows[0].email, role: 'Administrateur' } });
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur serveur lors de la connexion' });
-    }
+// ----------- API UTILISATEURS -----------
+app.get('/api/users/teachers', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, name, email FROM teachers ORDER BY id');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// Déconnexion (stateless)
-app.post('/api/logout', (req, res) => {
-    res.json({ message: 'Déconnexion réussie' });
+app.get('/api/users/students', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, name FROM students ORDER BY id');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// CRUD ressources génériques
-app.get('/api/resources/:type', async (req, res) => {
-    const type = req.params.type;
-    const table = tableMap[type];
-    if (!table) return res.status(400).json({ error: 'Type invalide' });
-    try {
-        const data = await fetchAll(table);
-        res.json(data);
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur serveur' });
-    }
-});
-app.post('/api/resources/:type', async (req, res) => {
-    const type = req.params.type;
-    const table = tableMap[type];
-    if (!table) return res.status(400).json({ error: 'Type invalide' });
-    try {
-        const newResource = await insert(table, req.body);
-        res.json(newResource);
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur serveur' });
-    }
-});
-app.put('/api/resources/:type/:id', async (req, res) => {
-    const { type, id } = req.params;
-    const table = tableMap[type];
-    if (!table) return res.status(400).json({ error: 'Type invalide' });
-    try {
-        const updated = await update(table, id, req.body);
-        res.json(updated);
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur serveur' });
-    }
-});
-app.delete('/api/resources/:type/:id', async (req, res) => {
-    const { type, id } = req.params;
-    const table = tableMap[type];
-    if (!table) return res.status(400).json({ error: 'Type invalide' });
-    try {
-        await remove(table, id);
-        res.json({ message: 'Ressource supprimée' });
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur serveur' });
-    }
+app.get('/api/users/admins', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, email FROM admins ORDER BY id');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// CRUD utilisateurs (admins, teachers, students)
-app.get('/api/users/:type', async (req, res) => {
-    const type = req.params.type;
-    const table = tableMap[type];
-    if (!table) return res.status(400).json({ error: 'Type invalide' });
-    try {
-        const data = await fetchAll(table);
-        res.json(data);
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur serveur' });
-    }
-});
-app.post('/api/users/:type', async (req, res) => {
-    const type = req.params.type;
-    const table = tableMap[type];
-    if (!table) return res.status(400).json({ error: 'Type invalide' });
-    try {
-        const newUser = await insert(table, req.body);
-        res.json(newUser);
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur serveur' });
-    }
-});
 app.put('/api/users/:type/:id', async (req, res) => {
-    const { type, id } = req.params;
-    const table = tableMap[type];
-    if (!table) return res.status(400).json({ error: 'Type invalide' });
-    try {
-        const updated = await update(table, id, req.body);
-        res.json(updated);
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur serveur' });
+  const { type, id } = req.params;
+  const { name, email, password } = req.body;
+  let query = '';
+  let values = [];
+  try {
+    if (type === 'teachers') {
+      query = password
+        ? 'UPDATE teachers SET email=$1, password=$2 WHERE id=$3'
+        : 'UPDATE teachers SET email=$1 WHERE id=$2';
+      values = password ? [email, password, id] : [email, id];
+    } else if (type === 'students') {
+      query = password
+        ? 'UPDATE students SET name=$1, password=$2 WHERE id=$3'
+        : 'UPDATE students SET name=$1 WHERE id=$2';
+      values = password ? [name, password, id] : [name, id];
+    } else if (type === 'admins') {
+      query = password
+        ? 'UPDATE admins SET email=$1, password=$2 WHERE id=$3'
+        : 'UPDATE admins SET email=$1 WHERE id=$2';
+      values = password ? [email, password, id] : [email, id];
+    } else {
+      return res.status(400).json({ error: 'Type inconnu' });
     }
+    await pool.query(query, values);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
+
 app.delete('/api/users/:type/:id', async (req, res) => {
-    const { type, id } = req.params;
-    const table = tableMap[type];
-    if (!table) return res.status(400).json({ error: 'Type invalide' });
-    try {
-        await remove(table, id);
-        res.json({ message: 'Utilisateur supprimé' });
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur serveur' });
+  const { type, id } = req.params;
+  let query = '';
+  try {
+    if (type === 'teachers') {
+      query = 'DELETE FROM teachers WHERE id=$1';
+    } else if (type === 'students') {
+      query = 'DELETE FROM students WHERE id=$1';
+    } else if (type === 'admins') {
+      query = 'DELETE FROM admins WHERE id=$1';
+    } else {
+      return res.status(400).json({ error: 'Type inconnu' });
     }
+    await pool.query(query, [id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// Contraintes (table constraints)
+// ----------- API RESSOURCES -----------
+app.get('/api/resources/teachers', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, name FROM teachers ORDER BY id');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/resources/groups', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, name, studentCount, subjects FROM groups ORDER BY id');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/resources/rooms', async (req, res) => {
+  try {
+    const result = await pool.query('SELECT id, name, capacity, equipment FROM rooms ORDER BY id');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/resources/teachers/:id', async (req, res) => {
+  const { id } = req.params;
+  const { name, subjects, availability } = req.body;
+  try {
+    await pool.query(
+      'UPDATE teachers SET name=$1, subjects=$2, availability=$3 WHERE id=$4',
+      [name, subjects, availability, id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/resources/groups/:id', async (req, res) => {
+  const { id } = req.params;
+  const { name, studentCount, subjects } = req.body;
+  try {
+    await pool.query(
+      'UPDATE groups SET name=$1, studentCount=$2, subjects=$3 WHERE id=$4',
+      [name, studentCount, subjects, id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/resources/rooms/:id', async (req, res) => {
+  const { id } = req.params;
+  const { name, capacity, equipment } = req.body;
+  try {
+    await pool.query(
+      'UPDATE rooms SET name=$1, capacity=$2, equipment=$3 WHERE id=$4',
+      [name, capacity, equipment, id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/resources/teachers/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    await pool.query('DELETE FROM teachers WHERE id=$1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/resources/groups/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    await pool.query('DELETE FROM groups WHERE id=$1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/resources/rooms/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    await pool.query('DELETE FROM rooms WHERE id=$1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ----------- API CONTRAINTES -----------
 app.get('/api/constraints', async (req, res) => {
-    try {
-        const data = await fetchAll('constraints');
-        res.json(data);
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur serveur' });
-    }
+  try {
+    const result = await pool.query('SELECT * FROM constraints ORDER BY id');
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
-app.post('/api/constraints', async (req, res) => {
-    try {
-        const newConstraint = await insert('constraints', req.body);
-        res.json(newConstraint);
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur serveur' });
-    }
-});
+
 app.put('/api/constraints/:id', async (req, res) => {
-    try {
-        const updated = await update('constraints', req.params.id, req.body);
-        res.json(updated);
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur serveur' });
-    }
+  const { id } = req.params;
+  const { resourceType, resource, day, time, type } = req.body;
+  try {
+    await pool.query(
+      'UPDATE constraints SET resourceType=$1, resource=$2, day=$3, time=$4, type=$5 WHERE id=$6',
+      [resourceType, resource, day, time, type, id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
+
 app.delete('/api/constraints/:id', async (req, res) => {
-    try {
-        await remove('constraints', req.params.id);
-        res.json({ message: 'Contrainte supprimée' });
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur serveur' });
-    }
+  const { id } = req.params;
+  try {
+    await pool.query('DELETE FROM constraints WHERE id=$1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
-// Documents (upload + CRUD)
-app.get('/api/documents', async (req, res) => {
-    try {
-        const data = await fetchAll('documents');
-        res.json(data);
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur serveur' });
-    }
-});
-app.post('/api/documents', upload.single('file'), async (req, res) => {
-    try {
-        const { title, category, uploadedBy } = req.body;
-        if (!title || !category || !req.file) {
-            return res.status(400).json({ error: 'Titre, catégorie et fichier requis' });
-        }
-        const newDocument = await insert('documents', {
-            title,
-            category,
-            fileName: req.file.filename,
-            uploadedBy: uploadedBy || 'Admin',
-            uploadDate: new Date().toISOString().slice(0, 16).replace('T', ' ')
-        });
-        res.json(newDocument);
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur serveur' });
-    }
-});
-app.get('/api/documents/:id/download', async (req, res) => {
-    try {
-        const doc = await fetchById('documents', req.params.id);
-        if (!doc) return res.status(404).json({ error: 'Document non trouvé' });
-        const filePath = path.join(uploadsDir, doc.filename || doc.fileName);
-        res.download(filePath, doc.filename || doc.fileName, err => {
-            if (err) res.status(500).json({ error: 'Erreur serveur lors du téléchargement' });
-        });
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur serveur' });
-    }
-});
-app.delete('/api/documents/:id', async (req, res) => {
-    try {
-        const doc = await fetchById('documents', req.params.id);
-        if (!doc) return res.status(404).json({ error: 'Document non trouvé' });
-        const filePath = path.join(uploadsDir, doc.filename || doc.fileName);
-        fs.unlink(filePath, () => {});
-        await remove('documents', req.params.id);
-        res.json({ message: 'Document supprimé' });
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur serveur' });
-    }
+// ----------- ROUTE PAR DEFAUT -----------
+app.get('*', (req, res) => {
+  // Sert index.html ou une page d'accueil si besoin
+  res.sendFile(path.join(__dirname, 'dashboard.html'));
 });
 
-// Génération automatique d'emploi du temps (exemple simple)
-app.post('/api/generate-timetable', async (req, res) => {
-    const { date } = req.body;
-    if (!date) return res.status(400).json({ error: 'Date requise' });
-    try {
-        const teachers = await fetchAll('teachers');
-        const groups = await fetchAll('groups');
-        const rooms = await fetchAll('rooms');
-        const constraints = await fetchAll('constraints');
-        const timetable = [];
-        const timeSlots = ['08:00-10:00', '10:00-12:00', '13:00-15:00', '15:00-17:00'];
-        const days = ['lundi', 'mardi', 'mercredi', 'jeudi', 'vendredi'];
-
-        for (const slot of timeSlots) {
-            const entry = { time: slot };
-            for (const day of days) {
-                const availableTeachers = teachers.filter(t =>
-                    !constraints.some(c =>
-                        c.resource === t.name &&
-                        c.day.toLowerCase() === day &&
-                        c.time === slot &&
-                        c.type === 'Indisponible'
-                    )
-                );
-                const availableGroups = groups.filter(g =>
-                    !constraints.some(c =>
-                        c.resource === g.name &&
-                        c.day.toLowerCase() === day &&
-                        c.time === slot &&
-                        c.type === 'Indisponible'
-                    )
-                );
-                const availableRooms = rooms.filter(r =>
-                    !constraints.some(c =>
-                        c.resource === r.name &&
-                        c.day.toLowerCase() === day &&
-                        c.time === slot &&
-                        c.type === 'Indisponible'
-                    )
-                );
-                if (availableTeachers.length && availableGroups.length && availableRooms.length) {
-                    const teacher = availableTeachers[Math.floor(Math.random() * availableTeachers.length)];
-                    const group = availableGroups[Math.floor(Math.random() * availableGroups.length)];
-                    const room = availableRooms[Math.floor(Math.random() * availableRooms.length)];
-                    const subject = teacher.subjects ? teacher.subjects.split(', ')[0] : 'Matière';
-                    entry[day] = `${subject} (${teacher.name}, ${group.name}, ${room.name})`;
-                } else {
-                    entry[day] = '-';
-                }
-            }
-            timetable.push(entry);
-        }
-        res.json({ date, timetable });
-    } catch (err) {
-        res.status(500).json({ error: 'Erreur serveur' });
-    }
+app.listen(port, () => {
+  console.log(`Serveur lancé sur http://localhost:${port}`);
 });
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Serveur démarré sur http://localhost:${PORT}`));
